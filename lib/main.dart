@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const MyApp());
@@ -7,115 +10,782 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'PCI MPoC Attestation',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
+        colorSchemeSeed: Colors.deepPurple,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  const MyHomePage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<MyHomePage> createState() =>
+      _MyHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _MyHomePageState
+    extends State<MyHomePage> {
 
-  void _incrementCounter() {
+  static const MethodChannel platform =
+  MethodChannel(
+    'com.paadevelopments.attestation_app/security',
+  );
+
+  /*
+   * =========================================================
+   * BACKEND URL
+   * =========================================================
+   */
+
+  static const String backendBaseUrl =
+      'http://YOUR_SERVER_IP:3000';
+
+  bool _isLoading = false;
+
+  String _status =
+      'System integrity not yet verified';
+
+  String? _nonce;
+
+  Map<String, dynamic>? _serverResult;
+
+  Map<dynamic, dynamic>? _localReport;
+
+  /*
+   * =========================================================
+   * STEP 1
+   * REQUEST NONCE FROM AMS BACKEND
+   * =========================================================
+   */
+
+  Future<void> _requestNonce() async {
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isLoading = true;
+      _status =
+      'Requesting attestation nonce...';
     });
+
+    try {
+
+      final response =
+      await http.get(
+        Uri.parse(
+          '$backendBaseUrl/api/attestation/nonce',
+        ),
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Failed to retrieve nonce',
+        );
+      }
+
+      final body =
+      jsonDecode(response.body);
+
+      final nonce =
+      body['nonce'];
+
+      if (nonce == null) {
+        throw Exception(
+          'Server returned invalid nonce',
+        );
+      }
+
+      setState(() {
+        _nonce = nonce;
+        _status =
+        'Nonce acquired successfully';
+      });
+
+    } catch (e) {
+
+      setState(() {
+        _status =
+        'Nonce request failed: $e';
+      });
+
+    } finally {
+
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
+
+  /*
+   * =========================================================
+   * STEP 2
+   * GENERATE ATTESTATION + SEND TO BACKEND
+   * =========================================================
+   */
+
+  Future<void> _runFullAttestation() async {
+
+    if (_nonce == null) {
+
+      setState(() {
+        _status =
+        'Request nonce first';
+      });
+
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _status =
+      'Generating hardware attestation...';
+    });
+
+    try {
+
+      /*
+       * =====================================================
+       * GET LOCAL DEVICE REPORT
+       * =====================================================
+       */
+
+      final Map<dynamic, dynamic> report =
+      await platform.invokeMethod(
+        'getSecurityReport',
+        {
+          'nonce': _nonce,
+        },
+      );
+
+      setState(() {
+        _localReport = report;
+        _status =
+        'Sending attestation to AMS backend...';
+      });
+
+      /*
+       * =====================================================
+       * SEND TO BACKEND
+       * =====================================================
+       */
+
+      final response =
+      await http.post(
+
+        Uri.parse(
+          '$backendBaseUrl/api/attestation/verify',
+        ),
+
+        headers: {
+          'Content-Type':
+          'application/json',
+        },
+
+        body: jsonEncode({
+
+          'nonce': _nonce,
+
+          'manufacturer':
+          report['manufacturer'],
+
+          'brand':
+          report['brand'],
+
+          'model':
+          report['model'],
+
+          'device':
+          report['device'],
+
+          'product':
+          report['product'],
+
+          'sdkInt':
+          report['sdkInt'],
+
+          'isRooted':
+          report['isRooted'],
+
+          'isHookDetected':
+          report['isHookDetected'],
+
+          'isSELinuxEnforced':
+          report['isSELinuxEnforced'],
+
+          'verifiedBootState':
+          report['verifiedBootState'],
+
+          'isBootloaderLocked':
+          report['isBootloaderLocked'],
+
+          'attestationSecurityLevel':
+          report['attestationSecurityLevel'],
+
+          'keymasterSecurityLevel':
+          report['keymasterSecurityLevel'],
+
+          'certificateChain':
+          report['certificateChain'],
+        }),
+      );
+
+      if (response.statusCode != 200) {
+
+        throw Exception(
+          'Backend validation failed',
+        );
+      }
+
+      final result =
+      jsonDecode(response.body);
+
+      setState(() {
+
+        _serverResult = result;
+
+        final bool passed =
+            result['success'] == true;
+
+        if (passed) {
+
+          _status =
+          '✅ PCI MPoC attestation passed';
+
+        } else {
+
+          _status =
+          '❌ PCI MPoC attestation failed';
+        }
+      });
+
+    } on PlatformException catch (e) {
+
+      setState(() {
+        _status =
+        'Platform error: ${e.message}';
+      });
+
+    } catch (e) {
+
+      setState(() {
+        _status =
+        'Attestation failed: $e';
+      });
+
+    } finally {
+
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  /*
+   * =========================================================
+   * STATUS COLOR
+   * =========================================================
+   */
+
+  Color _statusColor() {
+
+    if (_status.contains('passed')) {
+      return Colors.green;
+    }
+
+    if (_status.contains('failed')) {
+      return Colors.red;
+    }
+
+    return Colors.orange;
+  }
+
+  /*
+   * =========================================================
+   * BUILD
+   * =========================================================
+   */
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+
     return Scaffold(
+
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+        title: const Text(
+          'PCI MPoC Security Check',
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+
+      body: SafeArea(
+
+        child: SingleChildScrollView(
+
+          padding: const EdgeInsets.all(16),
+
+          child: Column(
+
+            crossAxisAlignment:
+            CrossAxisAlignment.stretch,
+
+            children: [
+
+              /*
+               * =================================================
+               * STATUS CARD
+               * =================================================
+               */
+
+              Card(
+
+                child: Padding(
+
+                  padding:
+                  const EdgeInsets.all(20),
+
+                  child: Column(
+
+                    children: [
+
+                      Icon(
+                        Icons.security,
+                        size: 56,
+                        color: _statusColor(),
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      Text(
+                        _status,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight:
+                          FontWeight.bold,
+                          color: _statusColor(),
+                        ),
+                      ),
+
+                      const SizedBox(height: 24),
+
+                      if (_isLoading)
+                        const CircularProgressIndicator()
+                      else ...[
+
+                        FilledButton.icon(
+
+                          onPressed:
+                          _requestNonce,
+
+                          icon: const Icon(
+                            Icons.vpn_key,
+                          ),
+
+                          label: const Text(
+                            '1. Request Nonce',
+                          ),
+                        ),
+
+                        const SizedBox(height: 12),
+
+                        FilledButton.icon(
+
+                          onPressed:
+                          _runFullAttestation,
+
+                          icon: const Icon(
+                            Icons.verified_user,
+                          ),
+
+                          label: const Text(
+                            '2. Run Attestation',
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              /*
+               * =================================================
+               * NONCE
+               * =================================================
+               */
+
+              if (_nonce != null)
+                _buildSectionCard(
+
+                  title: 'Server Nonce',
+
+                  children: [
+
+                    SelectableText(
+                      _nonce!,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                ),
+
+              /*
+               * =================================================
+               * LOCAL DEVICE REPORT
+               * =================================================
+               */
+
+              if (_localReport != null)
+                _buildSectionCard(
+
+                  title: 'Device Information',
+
+                  children: [
+
+                    _buildRow(
+                      'Manufacturer',
+                      '${_localReport!['manufacturer']}',
+                    ),
+
+                    _buildRow(
+                      'Brand',
+                      '${_localReport!['brand']}',
+                    ),
+
+                    _buildRow(
+                      'Model',
+                      '${_localReport!['model']}',
+                    ),
+
+                    _buildRow(
+                      'Android SDK',
+                      '${_localReport!['sdkInt']}',
+                    ),
+                  ],
+                ),
+
+              /*
+               * =================================================
+               * SECURITY CHECKS
+               * =================================================
+               */
+
+              if (_localReport != null)
+                _buildSectionCard(
+
+                  title: 'Security Checks',
+
+                  children: [
+
+                    _buildBooleanRow(
+                      'Root Detected',
+                      _localReport!['isRooted'],
+                    ),
+
+                    _buildBooleanRow(
+                      'Hook Framework',
+                      _localReport!['isHookDetected'],
+                    ),
+
+                    _buildBooleanRow(
+                      'SELinux Enforced',
+                      _localReport![
+                      'isSELinuxEnforced'
+                      ],
+                      invert: false,
+                    ),
+
+                    _buildBooleanRow(
+                      'Bootloader Locked',
+                      _localReport![
+                      'isBootloaderLocked'
+                      ],
+                      invert: false,
+                    ),
+                  ],
+                ),
+
+              /*
+               * =================================================
+               * VERIFIED BOOT
+               * =================================================
+               */
+
+              if (_localReport != null)
+                _buildSectionCard(
+
+                  title: 'Verified Boot',
+
+                  children: [
+
+                    _buildRow(
+                      'Verified Boot State',
+                      '${_localReport!['verifiedBootState']}',
+                    ),
+
+                    _buildRow(
+                      'Attestation Security',
+                      '${_localReport!['attestationSecurityLevel']}',
+                    ),
+
+                    _buildRow(
+                      'Keymaster Security',
+                      '${_localReport!['keymasterSecurityLevel']}',
+                    ),
+                  ],
+                ),
+
+              /*
+               * =================================================
+               * CERTIFICATES
+               * =================================================
+               */
+
+              if (_localReport != null)
+                _buildSectionCard(
+
+                  title:
+                  'Attestation Certificates',
+
+                  children: [
+
+                    _buildRow(
+                      'Certificate Count',
+                      '${(_localReport!['certificateChain']
+                      as List?)?.length ?? 0}',
+                    ),
+
+                    _buildRow(
+                      'Hardware Attestation',
+                      ((_localReport![
+                      'certificateChain']
+                      as List?)?.isNotEmpty ??
+                          false)
+                          ? 'AVAILABLE'
+                          : 'NOT AVAILABLE',
+                    ),
+                  ],
+                ),
+
+              /*
+               * =================================================
+               * SERVER VALIDATION
+               * =================================================
+               */
+
+              if (_serverResult != null)
+                _buildSectionCard(
+
+                  title:
+                  'AMS Backend Validation',
+
+                  children: [
+
+                    _buildBooleanRow(
+                      'Validation Success',
+                      _serverResult!['success'],
+                      invert: false,
+                    ),
+
+                    _buildBooleanRow(
+                      'Nonce Valid',
+                      _serverResult!['nonceValid'],
+                      invert: false,
+                    ),
+
+                    _buildBooleanRow(
+                      'Certificate Chain Trusted',
+                      _serverResult![
+                      'certificateChainTrusted'
+                      ],
+                      invert: false,
+                    ),
+
+                    _buildBooleanRow(
+                      'Rollback Resistant',
+                      _serverResult![
+                      'rollbackResistant'
+                      ],
+                      invert: false,
+                    ),
+
+                    _buildBooleanRow(
+                      'Hardware Backed',
+                      _serverResult![
+                      'hardwareBacked'
+                      ],
+                      invert: false,
+                    ),
+
+                    _buildBooleanRow(
+                      'Bootloader Locked',
+                      _serverResult![
+                      'bootloaderLocked'
+                      ],
+                      invert: false,
+                    ),
+
+                    _buildRow(
+                      'Risk Level',
+                      '${_serverResult!['riskLevel']}',
+                    ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /*
+   * =========================================================
+   * SECTION CARD
+   * =========================================================
+   */
+
+  Widget _buildSectionCard({
+    required String title,
+    required List<Widget> children,
+  }) {
+
+    return Padding(
+
+      padding:
+      const EdgeInsets.only(bottom: 16),
+
+      child: Card(
+
+        child: Padding(
+
+          padding:
+          const EdgeInsets.all(16),
+
+          child: Column(
+
+            crossAxisAlignment:
+            CrossAxisAlignment.start,
+
+            children: [
+
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight:
+                  FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              ...children,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /*
+   * =========================================================
+   * NORMAL ROW
+   * =========================================================
+   */
+
+  Widget _buildRow(
+      String label,
+      String value,
+      ) {
+
+    return Padding(
+
+      padding:
+      const EdgeInsets.symmetric(
+        vertical: 6,
+      ),
+
+      child: Row(
+
+        children: [
+
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontWeight:
+                FontWeight.w600,
+              ),
+            ),
+          ),
+
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.end,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /*
+   * =========================================================
+   * BOOLEAN ROW
+   * =========================================================
+   */
+
+  Widget _buildBooleanRow(
+      String label,
+      bool? value, {
+        bool invert = true,
+      }) {
+
+    final bool safe =
+    invert
+        ? !(value ?? true)
+        : (value ?? false);
+
+    return Padding(
+
+      padding:
+      const EdgeInsets.symmetric(
+        vertical: 6,
+      ),
+
+      child: Row(
+
+        children: [
+
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontWeight:
+                FontWeight.w600,
+              ),
+            ),
+          ),
+
+          Icon(
+            safe
+                ? Icons.check_circle
+                : Icons.cancel,
+            color:
+            safe
+                ? Colors.green
+                : Colors.red,
+          ),
+        ],
       ),
     );
   }
