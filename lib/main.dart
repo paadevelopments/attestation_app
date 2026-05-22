@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -7,8 +8,94 @@ void main() {
   runApp(const MyApp());
 }
 
+/*
+ * =========================================================
+ * ATTESTATION API LAYER
+ * =========================================================
+ */
+class AttestationApi {
+  final String baseUrl;
+
+  AttestationApi(this.baseUrl);
+
+  Future<String> requestNonce() async {
+    // Corrected to matching GET request
+    final response = await http.get(
+      Uri.parse('$baseUrl/nonce'),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Failed to fetch nonce');
+    }
+
+    final data = jsonDecode(response.body);
+    final nonce = data['nonce'];
+
+    if (nonce == null) {
+      throw Exception('Invalid nonce from server');
+    }
+
+    return nonce;
+  }
+
+  Future<Map<String, dynamic>> submitAttestation({
+    required String nonce,
+    required Map<dynamic, dynamic> report,
+  }) async {
+    // Transform the list of integer byte arrays into Base64 strings for serialization compatibility
+    List<String> base64Chain = [];
+    if (report['certificateChain'] != null) {
+      for (var certBytes in report['certificateChain']) {
+        base64Chain.add(base64Encode(List<int>.from(certBytes)));
+      }
+    }
+
+    final response = await http.post(
+      Uri.parse('$baseUrl/attest'), // Pointing to unified endpoint route
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'nonce': nonce,
+
+        // Device identity
+        'manufacturer': report['manufacturer'],
+        'brand': report['brand'],
+        'model': report['model'],
+        'device': report['device'],
+        'product': report['product'],
+        'sdkInt': report['sdkInt'],
+
+        // Security signals
+        'isRooted': report['isRooted'],
+        'isHookDetected': report['isHookDetected'],
+
+        'verifiedBootState': report['verifiedBootState'],
+        'isBootloaderLocked': report['isBootloaderLocked'],
+        'attestationSecurityLevel': report['attestationSecurityLevel'],
+        'keymasterSecurityLevel': report['keymasterSecurityLevel'],
+
+        // Normalized cryptographic proof chain sent as Base64 format
+        'certificateChain': base64Chain,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Attestation rejected by backend: ${response.body}');
+    }
+
+    return jsonDecode(response.body);
+  }
+}
+
+/*
+ * =========================================================
+ * UI APP
+ * =========================================================
+ */
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -31,137 +118,73 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+  static const MethodChannel platform =
+  MethodChannel('com.paadevelopments.attestation_app/security');
 
-  static const MethodChannel platform = MethodChannel(
-    'com.paadevelopments.attestation_app/security',
-  );
+  final AttestationApi api = AttestationApi('http://10.128.45.50:3000');
 
-  /*
-   * =========================================================
-   * BACKEND URL
-   * =========================================================
-   */
-
-  static const String backendBaseUrl = 'http://YOUR_SERVER_IP:3000';
-  bool _isLoading = false;
-  String _status = 'System integrity not yet verified';
   String? _nonce;
-  Map<String, dynamic>? _serverResult;
-  Map<dynamic, dynamic>? _localReport;
+  bool _loading = false;
+  String _status = 'System integrity not verified';
 
-  /*
-   * =========================================================
-   * STEP 1
-   * REQUEST NONCE FROM AMS BACKEND
-   * =========================================================
-   */
+  Map<dynamic, dynamic>? _localReport;
+  Map<String, dynamic>? _serverResult;
 
   Future<void> _requestNonce() async {
     setState(() {
-      _isLoading = true;
-      _status = 'Requesting attestation nonce...';
+      _loading = true;
+      _status = 'Requesting nonce...';
     });
+
     try {
-      final response =
-      await http.get(Uri.parse('$backendBaseUrl/api/attestation/nonce'));
-      if (response.statusCode != 200) {
-        throw Exception('Failed to retrieve nonce');
-      }
-      final body = jsonDecode(response.body);
-      final nonce = body['nonce'];
-      if (nonce == null) {
-        throw Exception('Server returned invalid nonce');
-      }
+      final nonce = await api.requestNonce();
       setState(() {
         _nonce = nonce;
-        _status = 'Nonce acquired successfully';
+        _status = 'Nonce acquired';
       });
     } catch (e) {
       setState(() {
-        _status = 'Nonce request failed: $e';
+        _status = 'Nonce error: $e';
       });
     } finally {
       setState(() {
-        _isLoading = false;
+        _loading = false;
       });
     }
   }
 
-  /*
-   * =========================================================
-   * STEP 2
-   * GENERATE ATTESTATION + SEND TO BACKEND
-   * =========================================================
-   */
-
-  Future<void> _runFullAttestation() async {
+  Future<void> _runAttestation() async {
     if (_nonce == null) {
-      setState(() {
-        _status = 'Request nonce first';
-      });
+      setState(() => _status = 'Request nonce first');
       return;
     }
+
     setState(() {
-      _isLoading = true;
-      _status = 'Generating hardware attestation...';
+      _loading = true;
+      _status = 'Generating attestation...';
     });
+
     try {
-      /*
-       * =====================================================
-       * GET LOCAL DEVICE REPORT
-       * =====================================================
-       */
-      final Map<dynamic, dynamic> report =
-      await platform.invokeMethod('getSecurityReport',{'nonce': _nonce});
+      final report = await platform.invokeMethod(
+        'getSecurityReport',
+        {'nonce': _nonce},
+      );
+
+      log(jsonEncode(report));
+
       setState(() {
         _localReport = report;
-        _status = 'Sending attestation to AMS backend...';
+        _status = 'Sending to backend...';
       });
-      /*
-       * =====================================================
-       * SEND TO BACKEND
-       * =====================================================
-       */
-      final response = await http.post(
-        Uri.parse('$backendBaseUrl/api/attestation/verify'),
-        headers: {
-          'Content-Type':
-          'application/json',
-        },
-        body: jsonEncode({
-          'nonce': _nonce,
-          'manufacturer': report['manufacturer'],
-          'brand': report['brand'],
-          'model': report['model'],
-          'device': report['device'],
-          'product': report['product'],
-          'sdkInt': report['sdkInt'],
-          'isRooted': report['isRooted'],
-          'isHookDetected': report['isHookDetected'],
-          'isSELinuxEnforced': report['isSELinuxEnforced'],
-          'verifiedBootState': report['verifiedBootState'],
-          'isBootloaderLocked': report['isBootloaderLocked'],
-          'attestationSecurityLevel': report['attestationSecurityLevel'],
-          'keymasterSecurityLevel': report['keymasterSecurityLevel'],
-          'certificateChain': report['certificateChain'],
-        }),
+
+      final result = await api.submitAttestation(
+        nonce: _nonce!,
+        report: report,
       );
-      if (response.statusCode != 200) {
-        throw Exception('Backend validation failed');
-      }
-      final result = jsonDecode(response.body);
+
       setState(() {
         _serverResult = result;
-        final bool passed = result['success'] == true;
-        if (passed) {
-          _status = '✅ PCI MPoC attestation passed';
-        } else {
-          _status = '❌ PCI MPoC attestation failed';
-        }
-      });
-    } on PlatformException catch (e) {
-      setState(() {
-        _status = 'Platform error: ${e.message}';
+        _status = result['success'] == true ? '✅ MPoC Approved' : '❌ MPoC Rejected';
       });
     } catch (e) {
       setState(() {
@@ -169,361 +192,84 @@ class _MyHomePageState extends State<MyHomePage> {
       });
     } finally {
       setState(() {
-        _isLoading = false;
+        _loading = false;
       });
     }
   }
 
-  /*
-   * =========================================================
-   * STATUS COLOR
-   * =========================================================
-   */
-
   Color _statusColor() {
-    if (_status.contains('passed')) {
-      return Colors.green;
-    }
-    if (_status.contains('failed')) {
-      return Colors.red;
-    }
+    if (_status.contains('Approved')) return Colors.green;
+    if (_status.contains('Rejected')) return Colors.red;
     return Colors.orange;
   }
-
-  /*
-   * =========================================================
-   * BUILD
-   * =========================================================
-   */
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'PCI MPoC Security Check',
-        ),
+        title: const Text('PCI MPoC Security Check'),
       ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment:
-            CrossAxisAlignment.stretch,
-            children: [
-              /*
-               * =================================================
-               * STATUS CARD
-               * =================================================
-               */
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    children: [
-                      Icon(
-                        Icons.security,
-                        size: 56,
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Icon(Icons.security, size: 50, color: _statusColor()),
+                    const SizedBox(height: 12),
+                    Text(
+                      _status,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
                         color: _statusColor(),
                       ),
-                      const SizedBox(height: 16),
-                      Text(
-                        _status,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight:
-                          FontWeight.bold,
-                          color: _statusColor(),
-                        ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (_loading)
+                      const CircularProgressIndicator()
+                    else ...[
+                      ElevatedButton(
+                        onPressed: _requestNonce,
+                        child: const Text('1. Request Nonce'),
                       ),
-                      const SizedBox(height: 24),
-                      if (_isLoading)
-                        const CircularProgressIndicator()
-                      else ...[
-                        FilledButton.icon(
-                          onPressed: _requestNonce,
-                          icon: const Icon(Icons.vpn_key),
-                          label: const Text(
-                            '1. Request Nonce',
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          onPressed: _runFullAttestation,
-                          icon: const Icon(Icons.verified_user),
-                          label: const Text(
-                            '2. Run Attestation',
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
+                      const SizedBox(height: 10),
+                      ElevatedButton(
+                        onPressed: _runAttestation,
+                        child: const Text('2. Run Attestation'),
+                      ),
+                    ]
+                  ],
                 ),
               ),
-              const SizedBox(height: 16),
-              /*
-               * =================================================
-               * NONCE
-               * =================================================
-               */
-              if (_nonce != null)
-                _buildSectionCard(
-                  title: 'Server Nonce',
-                  children: [
-                    SelectableText(
-                      _nonce!,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
-                ),
-              /*
-               * =================================================
-               * LOCAL DEVICE REPORT
-               * =================================================
-               */
-              if (_localReport != null)
-                _buildSectionCard(
-                  title: 'Device Information',
-                  children: [
-                    _buildRow(
-                      'Manufacturer',
-                      '${_localReport!['manufacturer']}',
-                    ),
-                    _buildRow(
-                      'Brand',
-                      '${_localReport!['brand']}',
-                    ),
-                    _buildRow(
-                      'Model',
-                      '${_localReport!['model']}',
-                    ),
-                    _buildRow(
-                      'Android SDK',
-                      '${_localReport!['sdkInt']}',
-                    ),
-                  ],
-                ),
-              /*
-               * =================================================
-               * SECURITY CHECKS
-               * =================================================
-               */
-              if (_localReport != null)
-                _buildSectionCard(
-                  title: 'Security Checks',
-                  children: [
-                    _buildBooleanRow(
-                      'Root Detected',
-                      _localReport!['isRooted'],
-                    ),
-                    _buildBooleanRow(
-                      'Hook Framework',
-                      _localReport!['isHookDetected'],
-                    ),
-                    _buildBooleanRow(
-                      'SELinux Enforced',
-                      _localReport!['isSELinuxEnforced'],
-                      invert: false,
-                    ),
-
-                    _buildBooleanRow(
-                      'Bootloader Locked',
-                      _localReport!['isBootloaderLocked'],
-                      invert: false,
-                    ),
-                  ],
-                ),
-              /*
-               * =================================================
-               * VERIFIED BOOT
-               * =================================================
-               */
-
-              if (_localReport != null)
-                _buildSectionCard(
-                  title: 'Verified Boot',
-                  children: [
-                    _buildRow(
-                      'Verified Boot State',
-                      '${_localReport!['verifiedBootState']}',
-                    ),
-                    _buildRow(
-                      'Attestation Security',
-                      '${_localReport!['attestationSecurityLevel']}',
-                    ),
-                    _buildRow(
-                      'Keymaster Security',
-                      '${_localReport!['keymasterSecurityLevel']}',
-                    ),
-                  ],
-                ),
-              /*
-               * =================================================
-               * CERTIFICATES
-               * =================================================
-               */
-              if (_localReport != null)
-                _buildSectionCard(
-                  title: 'Attestation Certificates',
-                  children: [
-                    _buildRow(
-                      'Certificate Count',
-                      '${(_localReport!['certificateChain'] as List?)?.length ?? 0}',
-                    ),
-                    _buildRow(
-                      'Hardware Attestation',
-                      ((_localReport!['certificateChain'] as List?)?.isNotEmpty ?? false) ? 'AVAILABLE' : 'NOT AVAILABLE',
-                    ),
-                  ],
-                ),
-              /*
-               * =================================================
-               * SERVER VALIDATION
-               * =================================================
-               */
-              if (_serverResult != null)
-                _buildSectionCard(
-                  title: 'AMS Backend Validation',
-                  children: [
-                    _buildBooleanRow(
-                      'Validation Success',
-                      _serverResult!['success'],
-                      invert: false,
-                    ),
-                    _buildBooleanRow(
-                      'Nonce Valid',
-                      _serverResult!['nonceValid'],
-                      invert: false,
-                    ),
-                    _buildBooleanRow(
-                      'Certificate Chain Trusted',
-                      _serverResult!['certificateChainTrusted'],
-                      invert: false,
-                    ),
-                    _buildBooleanRow(
-                      'Rollback Resistant',
-                      _serverResult!['rollbackResistant'],
-                      invert: false,
-                    ),
-                    _buildBooleanRow(
-                      'Hardware Backed',
-                      _serverResult!['hardwareBacked'],
-                      invert: false,
-                    ),
-                    _buildBooleanRow(
-                      'Bootloader Locked',
-                      _serverResult!['bootloaderLocked'],
-                      invert: false,
-                    ),
-                    _buildRow(
-                      'Risk Level',
-                      '${_serverResult!['riskLevel']}',
-                    ),
-                  ],
-                ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 16),
+            if (_nonce != null) _infoCard('Nonce', _nonce!),
+            if (_localReport != null) _infoCard('Device', _localReport.toString()),
+            if (_serverResult != null) _infoCard('Backend Result', _serverResult.toString()),
+          ],
         ),
       ),
     );
   }
 
-  /*
-   * =========================================================
-   * SECTION CARD
-   * =========================================================
-   */
-
-  Widget _buildSectionCard({
-    required String title,
-    required List<Widget> children,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment:
-            CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight:
-                  FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 16),
-              ...children,
-            ],
-          ),
+  Widget _infoCard(String title, String value) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            SelectableText(value),
+          ],
         ),
-      ),
-    );
-  }
-
-  /*
-   * =========================================================
-   * NORMAL ROW
-   * =========================================================
-   */
-
-  Widget _buildRow(String label, String value,) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(
-                fontWeight:
-                FontWeight.w600,
-              ),
-            ),
-          ),
-          Flexible(
-            child: Text(
-              value,
-              textAlign: TextAlign.end,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /*
-   * =========================================================
-   * BOOLEAN ROW
-   * =========================================================
-   */
-
-  Widget _buildBooleanRow(String label, bool? value, {bool invert = true}) {
-    final bool safe = invert ? !(value ?? true) : (value ?? false);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(
-                fontWeight:
-                FontWeight.w600,
-              ),
-            ),
-          ),
-          Icon(
-            safe ? Icons.check_circle : Icons.cancel,
-            color: safe ? Colors.green : Colors.red,
-          ),
-        ],
       ),
     );
   }
