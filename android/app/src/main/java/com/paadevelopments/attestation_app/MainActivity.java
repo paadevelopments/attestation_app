@@ -67,16 +67,20 @@ public class MainActivity extends FlutterActivity {
                             break;
                         case "checkBootloaderStatus":
                             try {
-                                List<byte[]> chain = call.argument("certificateChain");
-                                result.success(isBootloaderLocked(chain));
+                                // Adapt to handle incoming Base64-encoded lists if called independently
+                                List<String> b64Chain = call.argument("certificateChain");
+                                List<byte[]> rawChain = convertBase64ChainToBytes(b64Chain);
+                                result.success(isBootloaderLocked(rawChain));
                             } catch (Exception e) {
                                 result.error("BOOTLOADER_ERROR", e.getMessage(), null);
                             }
                             break;
                         case "getVerifiedBootState":
                             try {
-                                List<byte[]> chain = call.argument("certificateChain");
-                                result.success(getVerifiedBootState(chain));
+                                // Adapt to handle incoming Base64-encoded lists if called independently
+                                List<String> b64Chain = call.argument("certificateChain");
+                                List<byte[]> rawChain = convertBase64ChainToBytes(b64Chain);
+                                result.success(getVerifiedBootState(rawChain));
                             } catch (Exception e) {
                                 result.error("BOOTSTATE_ERROR", e.getMessage(), null);
                             }
@@ -100,15 +104,25 @@ public class MainActivity extends FlutterActivity {
         report.put("isHookDetected", isHookingFrameworkDetected());
         report.put("isDebuggerAttached", Debug.isDebuggerConnected());
         report.put("isEmulator", isEmulator());
+
         byte[][] chain = getHardwareAttestationChain(nonce);
         if (chain != null) {
-            List<byte[]> certList = new ArrayList<>();
-            Collections.addAll(certList, chain);
-            report.put("certificateChain", certList);
-            report.put("isBootloaderLocked", isBootloaderLocked(certList));
-            report.put("verifiedBootState", getVerifiedBootState(certList));
-            report.put("attestationSecurityLevel", getAttestationSecurityLevel(certList));
-            report.put("keymasterSecurityLevel", getKeymasterSecurityLevel(certList));
+            // FIX: Explicitly map binary arrays to a structured Base64 String List
+            List<String> base64CertList = new ArrayList<>();
+            for (byte[] certBytes : chain) {
+                base64CertList.add(android.util.Base64.encodeToString(certBytes, android.util.Base64.NO_WRAP));
+            }
+            // This key will match the exact parameter mapping expected by Jackson on the server
+            report.put("certificateChain", base64CertList);
+
+            // Re-wrap binary representations safely for your local client-side ASN1 parsers below
+            List<byte[]> localRawChain = new ArrayList<>();
+            Collections.addAll(localRawChain, chain);
+
+            report.put("isBootloaderLocked", isBootloaderLocked(localRawChain));
+            report.put("verifiedBootState", getVerifiedBootState(localRawChain));
+            report.put("attestationSecurityLevel", getAttestationSecurityLevel(localRawChain));
+            report.put("keymasterSecurityLevel", getKeymasterSecurityLevel(localRawChain));
             report.put("hardwareBacked", isHardwareBackedKeyStore());
             report.put("strongBoxSupported", isStrongBoxSupported());
         } else {
@@ -137,6 +151,7 @@ public class MainActivity extends FlutterActivity {
             )
                     .setDigests(KeyProperties.DIGEST_SHA256)
                     .setAttestationChallenge(nonce.getBytes(StandardCharsets.UTF_8));
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 try {
                     builder.setIsStrongBoxBacked(false);
@@ -335,5 +350,19 @@ public class MainActivity extends FlutterActivity {
     public boolean isStrongBoxSupported() {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
                 && getPackageManager().hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
+    }
+
+    /**
+     * Helper utility for deserializing incoming Base64 lists down to raw byte arrays
+     */
+    private List<byte[]> convertBase64ChainToBytes(List<String> b64Chain) {
+        if (b64Chain == null) return Collections.emptyList();
+        List<byte[]> rawChain = new ArrayList<>();
+        for (String base64Cert : b64Chain) {
+            if (base64Cert != null && !base64Cert.trim().isEmpty()) {
+                rawChain.add(android.util.Base64.decode(base64Cert.trim(), android.util.Base64.NO_WRAP));
+            }
+        }
+        return rawChain;
     }
 }

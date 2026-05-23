@@ -19,7 +19,6 @@ class AttestationApi {
   AttestationApi(this.baseUrl);
 
   Future<String> requestNonce() async {
-    // Corrected to matching GET request
     final response = await http.get(
       Uri.parse('$baseUrl/nonce'),
     );
@@ -42,16 +41,13 @@ class AttestationApi {
     required String nonce,
     required Map<dynamic, dynamic> report,
   }) async {
-    // Transform the list of integer byte arrays into Base64 strings for serialization compatibility
-    List<String> base64Chain = [];
-    if (report['certificateChain'] != null) {
-      for (var certBytes in report['certificateChain']) {
-        base64Chain.add(base64Encode(List<int>.from(certBytes)));
-      }
-    }
+    // FIX: The native platform already returns a List<String> of Base64 strings.
+    // We simply cast it safely or fall back to an empty list.
+    List<dynamic> nativeChain = report['certificateChain'] ?? [];
+    List<String> base64Chain = nativeChain.map((cert) => cert.toString()).toList();
 
     final response = await http.post(
-      Uri.parse('$baseUrl/attest'), // Pointing to unified endpoint route
+      Uri.parse('$baseUrl/attest'),
       headers: {
         'Content-Type': 'application/json',
       },
@@ -75,7 +71,7 @@ class AttestationApi {
         'attestationSecurityLevel': report['attestationSecurityLevel'],
         'keymasterSecurityLevel': report['keymasterSecurityLevel'],
 
-        // Normalized cryptographic proof chain sent as Base64 format
+        // Clean, structured cryptographic proof chain forwarded directly to your multi-root backend
         'certificateChain': base64Chain,
       }),
     );
@@ -187,6 +183,7 @@ class _MyHomePageState extends State<MyHomePage> {
         _status = result['success'] == true ? '✅ MPoC Approved' : '❌ MPoC Rejected';
       });
     } catch (e) {
+      log('Attestation step failure tracking context', error: e);
       setState(() {
         _status = 'Attestation failed: $e';
       });
