@@ -121,7 +121,7 @@ class _MyHomePageState extends State<MyHomePage> {
   static const MethodChannel platform =
   MethodChannel('com.paadevelopments.attestation_app/security');
 
-  final AttestationApi api = AttestationApi('http://10.128.45.50:3000');
+  final AttestationApi api = AttestationApi('http://10.128.45.50:8080');
 
   String? _nonce;
   bool _loading = false;
