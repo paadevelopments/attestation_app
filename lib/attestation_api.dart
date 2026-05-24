@@ -38,6 +38,7 @@ class AttestationApi {
       body: jsonEncode({
         "nonce": nonce,
         "packageName": report["packageName"],
+        "signature": report["signature"],
 
         // Device identity
         "manufacturer": report["manufacturer"],

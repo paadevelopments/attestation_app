@@ -2,7 +2,9 @@ package com.paadevelopments.attestation_app;
 
 import androidx.annotation.NonNull;
 
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.os.Build;
 import android.os.Debug;
 import android.security.keystore.KeyGenParameterSpec;
@@ -24,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
@@ -93,6 +96,11 @@ public class MainActivity extends FlutterActivity {
 
     private Map<String, Object> buildSecurityReport(String nonce) {
         Map<String, Object> report = new HashMap<>();
+        try {
+            report.put("signature", getAppSigningCertFingerprint());
+        } catch (Exception e) {
+            report.put("signature", "INVALID_SIGNATURE");
+        }
         report.put("packageName", getApplicationContext().getPackageName());
         report.put("manufacturer", Build.MANUFACTURER);
         report.put("brand", Build.BRAND);
@@ -365,5 +373,39 @@ public class MainActivity extends FlutterActivity {
             }
         }
         return rawChain;
+    }
+
+    private String getAppSigningCertFingerprint() throws Exception {
+        PackageManager pm = getApplicationContext().getPackageManager();
+        String packageName = getApplicationContext().getPackageName();
+        PackageInfo info;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES);
+            if (info.signingInfo == null) {
+                throw new SecurityException("Missing signingInfo");
+            }
+            Signature[] signatures = info.signingInfo.getApkContentsSigners();
+            if (signatures == null || signatures.length == 0) {
+                throw new SecurityException("Missing APK signing certificates");
+            }
+            return sha256(signatures[0].toByteArray());
+        } else {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+            Signature[] signatures = info.signatures;
+            if (signatures == null || signatures.length == 0) {
+                throw new SecurityException("Missing APK signatures");
+            }
+            return sha256(signatures[0].toByteArray());
+        }
+    }
+
+    private String sha256(byte[] data) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        byte[] digest = md.digest(data);
+        StringBuilder sb = new StringBuilder();
+        for (byte b : digest) {
+            sb.append(String.format("%02X", b));
+        }
+        return sb.toString();
     }
 }
