@@ -53,6 +53,7 @@ class AttestationApi {
       },
       body: jsonEncode({
         'nonce': nonce,
+        'packageName': report['packageName'],
 
         // Device identity
         'manufacturer': report['manufacturer'],

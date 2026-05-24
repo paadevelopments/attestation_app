@@ -93,6 +93,7 @@ public class MainActivity extends FlutterActivity {
 
     private Map<String, Object> buildSecurityReport(String nonce) {
         Map<String, Object> report = new HashMap<>();
+        report.put("packageName", getApplicationContext().getPackageName());
         report.put("manufacturer", Build.MANUFACTURER);
         report.put("brand", Build.BRAND);
         report.put("model", Build.MODEL);
