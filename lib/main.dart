@@ -169,7 +169,7 @@ class _MyHomePageState extends State<MyHomePage> {
       log(jsonEncode(report));
 
       setState(() {
-        _localReport = report;
+        _localReport = _truncateCertificateChain(report);
         _status = 'Sending to backend...';
       });
 
@@ -198,6 +198,18 @@ class _MyHomePageState extends State<MyHomePage> {
     if (_status.contains('Approved')) return Colors.green;
     if (_status.contains('Rejected')) return Colors.red;
     return Colors.orange;
+  }
+
+  Map<dynamic, dynamic> _truncateCertificateChain(dynamic rawReport) {
+    final Map<dynamic, dynamic> reportMap = Map<dynamic, dynamic>.from(rawReport as Map);
+    if (reportMap['certificateChain'] is Iterable) {
+      final List<dynamic> rawChain = reportMap['certificateChain'];
+      reportMap['certificateChain'] = rawChain.map((cert) {
+        final String certStr = cert.toString();
+        return certStr.length > 15 ? '${certStr.substring(0, 15)}...' : certStr;
+      }).toList();
+    }
+    return reportMap;
   }
 
   @override
